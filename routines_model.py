@@ -169,7 +169,7 @@ def metric(invSR, data, fs, interpolator=interpolate_CubicSpline, metric_type="B
     metric = N*np.log(RSS/N) + coef*n_params
     return metric
     
-def metric_piecewise(depth_invSR, data, fs, interpolator=interpolate_CubicSpline, n_pieces=1, invSR_lims=None, *args, **kwargs):
+def metric_piecewise(depth_invSR, data, fs, interpolator=interpolate_CubicSpline, n_pieces=1, invSR_lims=None, metric_type="r2", *args, **kwargs):
     """_summary_: 
     
         metric  (according to the metric type) for the linear model with predictors variable are fourier harmonics of frequencies fs
@@ -201,13 +201,19 @@ def metric_piecewise(depth_invSR, data, fs, interpolator=interpolate_CubicSpline
     y_pred = reg_model.predict(X)
     
     depth_pieces = np.linspace(depth[0], depth[-1], n_pieces+1)
-    r2 = np.zeros(n_pieces)
+    # r2 = np.zeros(n_pieces)
+    # RSS = np.zeros(n_pieces)
+    metrix = np.zeros(n_pieces)
+
     for i in range(n_pieces):
         j1, j2 = np.searchsorted(depth, depth_pieces[i],"left"),  np.searchsorted(depth, depth_pieces[i+1], "right")
-        
-        r2[i] = r2_score(y_data[j1:j2], y_pred[j1:j2])
-        
-    return r2
+        if metric_type == "r2":
+            metrix[i] = r2_score(y_data[j1:j2], y_pred[j1:j2])
+        elif metric_type == "RSS":
+            metrix[i] = np.mean((y_data[j1:j2] - y_pred[j1:j2])**2)
+        else:
+            print("metric type not defined")
+    return metrix
 
 def invSR_to_pred(depth_invSR, data, invSR_lims, fs, interpolator=interpolate_CubicSpline):
     depth, y = data
@@ -401,3 +407,46 @@ def log_posterior_whitenoise(params, depth_invSR, data, prior_freq, interpolator
     if not np.isfinite(lp):
         return -np.inf
     return lp + log_likelihood_whitenoise([depth_invSR, invSR], data, fs, sigma, interpolator=interpolator)
+
+
+def log_posterior_whitenoise_EP(params, depth_invSR, data, prior_freq, interpolator=interpolate_CubicSpline, invSR_lims=[0,2],
+                             sigma_lims=[1e-4, 2]):
+    """ same as log_posterior_whitenoise_v1 but frequencies are no longer constant but treated as parameters
+    params: array[1 + N_genes] = [sigma, rho (from AR1), array of invSR]
+    prior_fs: array[N_freq, 2] :  parameters of prior for frequencies fs, (Gaussian with muy and sigma as params) 
+    """
+    sigma =  params[0]
+    N_freq = prior_freq.shape[0]
+    freqs = params[1:1+N_freq]
+    fs = np.hstack([freqs[0] + freqs[1:], [freqs[2]-freqs[5], freqs[4]-freqs[3] , freqs[4]-freqs[2], freqs[3]-freqs[5], freqs[3]-freqs[2]]])
+    invSR = params[1+N_freq:]
+    
+    
+    lp_invSR = log_uniform(invSR, invSR_lims)
+    lp_sigma = log_loguniform(sigma, sigma_lims)    
+    lp_fs = sum([log_gaussian(freqs[i], prior_freq[i]) for i in range(N_freq) ])
+    lp = lp_invSR + lp_sigma + lp_fs
+    if not np.isfinite(lp):
+        return -np.inf
+    return lp + log_likelihood_whitenoise([depth_invSR, invSR], data, fs, sigma, interpolator=interpolator)
+
+
+def log_posterior_rednoise_EP(params, depth_invSR, data, prior_freq, interpolator=interpolate_CubicSpline, invSR_lims=[0,2],
+                             sigma_lims=[1e-4, 2]):
+    """ same as log_posterior_whitenoise_EP but with rednoise
+    """
+    sigma, rho = params[:2]
+    N_freq = prior_freq.shape[0]
+    freqs = params[2:2+N_freq]
+    fs = np.hstack([freqs[0] + freqs[1:], [freqs[2]-freqs[5], freqs[4]-freqs[3] , freqs[4]-freqs[2], freqs[3]-freqs[5], freqs[3]-freqs[2]]])
+    invSR = params[2+N_freq:]
+    
+    
+    lp_invSR = log_uniform(invSR, invSR_lims)
+    lp_sigma = log_loguniform(sigma, sigma_lims)    
+    lp_fs = sum([log_gaussian(freqs[i], prior_freq[i]) for i in range(N_freq) ])
+    lp = lp_invSR + lp_sigma + lp_fs
+    if not np.isfinite(lp):
+        return -np.inf
+    
+    return lp + log_likelihood_rednoise([depth_invSR, invSR], data, fs, [sigma, rho], interpolator=interpolator)
