@@ -110,6 +110,9 @@ def generate_X_linReg(Amp, freq, times):
 # ## Metric
 
 # %%
+def interpolate_Pchip(xy, xs):
+    spl_xy = PchipInterpolator(*xy)
+    return spl_xy(xs)
 def interpolate_BSpline(SR, depth):
     spl_SR = splrep(*SR)
     SR_interpolate = splev(depth, spl_SR)
@@ -122,8 +125,8 @@ def interpolate_CubicSpline(SR, depth):
     
 def interpolate_Akima(SR, depth):
     if len(SR[0]) == 2:
-        slope = (SR[1,1]-SR[1,0])/(SR[0,1]-SR[0,0])
-        SR_interpolate = slope*depth + SR[1,0]
+        slope = (SR[1][1]-SR[1][0])/(SR[0][1]-SR[0][0])
+        SR_interpolate = slope*depth + SR[1][0]
     else:
         SR_interpolate = Akima1DInterpolator(SR[0],SR[1])(depth)
     return SR_interpolate
