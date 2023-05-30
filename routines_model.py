@@ -23,6 +23,7 @@ from sklearn import linear_model
 from sklearn.metrics import r2_score
 import scipy as sp
 from pymoo.core.problem import ElementwiseProblem
+from pymoo.core.callback import Callback
 
 
 # %% [markdown]
@@ -131,7 +132,7 @@ def interpolate_Akima(SR, depth):
         SR_interpolate = Akima1DInterpolator(SR[0],SR[1])(depth)
     return SR_interpolate
 
-def metric(invSR, data, fs, interpolator=interpolate_CubicSpline, metric_type="BIC", *args, **kwargs):
+def metric_v0(invSR, data, fs, interpolator=interpolate_CubicSpline, metric_type="BIC", *args, **kwargs):
     """_summary_: 
     
         metric  (according to the metric type) for the linear model with predictors variable are fourier harmonics of frequencies fs
@@ -170,6 +171,47 @@ def metric(invSR, data, fs, interpolator=interpolate_CubicSpline, metric_type="B
     elif metric_type == "RSS":
         coef = 0
     metric = N*np.log(RSS/N) + coef*n_params
+    return metric
+    
+def metric_v1(invSR, data, fs, interpolator=interpolate_CubicSpline, metric_type="BIC", *args, **kwargs):
+    """_summary_: 
+    
+        metric  (according to the metric type) for the linear model with predictors variable are fourier harmonics of frequencies fs
+        of fitting the data, when used the age model derived from the invSR.
+        age model: given points of inverse SR, interpolate with an interpolator and integrate along depth
+        to obtain time.
+    Args:
+        invSR (array[2,n]): inverse of sedimetation rates and their corresponding depth 
+        interpolator: interpolator
+        data (array[2,m]): the data and corresponding depth
+        fs (_type_): list of frequencies of the model
+        metric_type (str, optional):"BIC", "AIC" or "RSS". Defaults to "BIC".
+            Returns:
+        int: metric
+           
+    """
+
+    depth, y_data = data
+
+    invSR_interpolate = interpolator(invSR, depth)
+    # invSR_interpolate[invSR_interpolate<0] = 0
+    
+    time = sp.integrate.cumulative_trapezoid(invSR_interpolate, depth, initial=0)
+    X = generate_X_linReg(np.ones_like(fs), fs, time)
+
+    reg_model = LinearRegression().fit(X, y_data)
+    # Residual Sum Square
+    RSS = np.sum((y_data - reg_model.predict(X))**2)
+    N = len(y_data)
+    n_params_SR = len(invSR[0])
+    # n_params = n_params_SR 
+    if metric_type == "BIC":
+        coef = np.log(N)
+    elif metric_type == "AIC":
+        coef = 2
+    elif metric_type == "RSS":
+        coef = 0
+    metric = N*np.log(RSS/N) + coef*n_params_SR
     return metric
     
 def metric_piecewise(depth_invSR, data, fs, interpolator=interpolate_CubicSpline, n_pieces=1, invSR_lims=None, metric_type="r2", *args, **kwargs):
@@ -218,6 +260,59 @@ def metric_piecewise(depth_invSR, data, fs, interpolator=interpolate_CubicSpline
             print("metric type not defined")
     return metrix
 
+def metric_piecewise_reg(depth_invSR, data, fs, spline=CubicSpline, n_pieces=1, invSR_lims=None, metric_type="r2", lambda_reg=0, *args, **kwargs):
+    """_summary_: 
+    
+        metric  (according to the metric type) for the linear model with predictors variable are fourier harmonics of frequencies fs
+        of fitting the data, when used the age model derived from the invSR.
+        age model: given points of inverse SR, interpolate with an interpolator and integrate along depth
+        to obtain time.
+        with penalty terms for roughness with coefficient lambda : integral of squared of second derivative of the invSR function    
+    Args:
+        depth_invSR (array[2,n]): inverse of sedimetation rates and their corresponding depth 
+        interpolator: interpolator
+        data (array[2,m]): the data and corresponding depth
+        fs (_type_): list of frequencies of the model
+        metric_type (str, optional):"BIC", "AIC" or "RSS". Defaults to "BIC".
+            Returns:
+        int: metric
+           
+    """
+
+    depth, y_data = data
+
+    invSR_spline = spline(*depth_invSR)
+    invSR_interpolate = invSR_spline(depth)
+    if lambda_reg != 0:
+        second_der = invSR_spline.derivative(2)
+        roughness = sp.integrate.quad(lambda x: second_der(x)**2, depth[0], depth[-1])
+    else:
+        roughness = 0
+    if invSR_lims is not None:
+        invSR_interpolate[invSR_interpolate<invSR_lims[0]] = invSR_lims[0]
+        invSR_interpolate[invSR_interpolate>invSR_lims[1]] = invSR_lims[1]
+    
+    time = sp.integrate.cumulative_trapezoid(invSR_interpolate, depth, initial=0)
+    X = generate_X_linReg(np.ones_like(fs), fs, time)
+
+    reg_model = LinearRegression().fit(X, y_data)
+    y_pred = reg_model.predict(X)
+    
+    depth_pieces = np.linspace(depth[0], depth[-1], n_pieces+1)
+    # r2 = np.zeros(n_pieces)
+    # RSS = np.zeros(n_pieces)
+    metrix = np.zeros(n_pieces)
+
+    for i in range(n_pieces):
+        j1, j2 = np.searchsorted(depth, depth_pieces[i],"left"),  np.searchsorted(depth, depth_pieces[i+1], "right")
+        if metric_type == "r2":
+            metrix[i] = r2_score(y_data[j1:j2], y_pred[j1:j2]) - lambda_reg*roughness
+        elif metric_type == "RSS":
+            metrix[i] = np.mean((y_data[j1:j2] - y_pred[j1:j2])**2)  - lambda_reg*roughness
+        else:
+            print("metric type not defined")
+    return metrix
+
 def invSR_to_pred(depth_invSR, data, invSR_lims, fs, interpolator=interpolate_CubicSpline):
     depth, y = data
     invSR_interpolate = interpolator(depth_invSR, depth)
@@ -248,7 +343,15 @@ class invSRinference(ElementwiseProblem):
     def _evaluate(self, genes, out, *args, **kwargs):
         
         out["F"] = -self.func_metric([self.depth_genes, genes])
+class Callback_getF(Callback):
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.data["best"] = []
+
+    def notify(self, algorithm):
+        b = algorithm.pop.get("F").mean(axis=1).min()
+        self.data["best"].append(b)
 # %%
 def log_likelihood_whitenoise(invSR, data, fs, sigma, interpolator=interpolate_CubicSpline, *args, **kwargs):
     """_summary_: 
