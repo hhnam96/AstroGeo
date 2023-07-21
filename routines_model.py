@@ -120,8 +120,11 @@ def interpolate_BSpline(SR, depth):
     return SR_interpolate
 
 def interpolate_CubicSpline(SR, depth):
-    spl_SR = CubicSpline(*SR)
-    SR_interpolate = spl_SR(depth)
+    if len(SR[0]) == 1:
+        SR_interpolate = np.ones_like(depth)*SR[1]
+    else:
+        spl_SR = CubicSpline(*SR)
+        SR_interpolate = spl_SR(depth)
     return SR_interpolate
     
 def interpolate_Akima(SR, depth):
@@ -324,6 +327,31 @@ def invSR_to_pred(depth_invSR, data, invSR_lims, fs, interpolator=interpolate_Cu
     y_pred = reg_model.predict(X)
     return time, y_pred
 
+def invSR_to_pred_v2(depth_invSR, data, invSR_lims, fs, interpolator=interpolate_CubicSpline):
+    depth, y = data
+    invSR_interpolate = interpolator(depth_invSR, depth)
+    invSR_interpolate[invSR_interpolate<invSR_lims[0]] = invSR_lims[0]
+    invSR_interpolate[invSR_interpolate>invSR_lims[1]] = invSR_lims[1]
+    time = sp.integrate.cumulative_trapezoid(invSR_interpolate, depth, initial=0)
+    X = generate_X_linReg(np.ones_like(fs), fs, time)
+    reg_model = LinearRegression().fit(X, y)
+    y_pred = reg_model.predict(X)
+    return time, y_pred, reg_model.coef_
+
+def metric_piecewise_short(y_data, y_pred, n_pieces, metric_type="r2"):
+    metrix = np.zeros(n_pieces)
+    n = len(y_data)
+    j2 = 0
+    for i in range(n_pieces):
+        j1, j2 = j2, n//(n_pieces)*(i+1)
+        if metric_type == "r2":
+            metrix[i] = r2_score(y_data[j1:j2], y_pred[j1:j2])
+        elif metric_type == "RSS":
+            metrix[i] = np.mean((y_data[j1:j2] - y_pred[j1:j2])**2)
+        else:
+            print("metric type not defined")
+    return metrix 
+
 class invSRinference(ElementwiseProblem):
 
     def __init__(self, depth_genes, genes_lims, interpolator, data, fs, n_pieces=1, metric=metric_piecewise):
@@ -343,6 +371,66 @@ class invSRinference(ElementwiseProblem):
     def _evaluate(self, genes, out, *args, **kwargs):
         
         out["F"] = -self.func_metric([self.depth_genes, genes])
+class invSR_p0_inference(ElementwiseProblem):
+    """ same as invSRinference, include p0 as genes, input fsp is fs defined without p0 (first fives values are g1,..,5)"""
+    def __init__(self, depth_genes, invSR_lims, p0_lims, interpolator, data, fsp, n_pieces=1, metric=metric_piecewise):
+
+        self.invSR_lims = invSR_lims
+        self.p0_lims = p0_lims
+        self.depth_genes = depth_genes 
+        self.interpolator = interpolator
+        self.data = data
+        self.fsp = fsp
+
+        N_genes_invSR = len(depth_genes)
+        xl = np.zeros(N_genes_invSR+1) + invSR_lims[0]
+        xu = np.zeros(N_genes_invSR+1) + invSR_lims[1]
+        xl[0] = p0_lims[0]; xu[0] = p0_lims[1]
+        self.func_metric = partial(metric, data=data, interpolator=interpolator, n_pieces=n_pieces, invSR_lims=invSR_lims)
+        super().__init__(n_var=N_genes_invSR+1, n_obj=n_pieces, xl=xl, xu=xu)
+
+    def _evaluate(self, genes, out, *args, **kwargs):
+        genes_p0 = genes[0]
+        genes_invSR = genes[1:]
+        fs = self.fsp.copy()
+        fs[:5] += genes_p0
+        # print(len(self.depth_genes), len(genes_invSR))
+        out["F"] = -self.func_metric([self.depth_genes, genes_invSR], fs=fs)
+        
+class invSR_p0_inference_constrained(ElementwiseProblem):
+    """ same as invSRinference, include p0 as genes, input fsp is fs defined without p0 (first fives values are g1,..,5)
+        constrained on invSR and p0
+        suchthat fs/2 > (p0+g4)/2/np.pi where fs = sampling rate = 1/dt 
+        this is <=> T_duration * (p0+g4)/2/pi < (n-1)/2
+    """
+    def __init__(self, depth_genes, invSR_lims, p0_lims, interpolator, data, fsp, n_pieces=1, metric=metric_piecewise_short):
+
+        self.invSR_lims = invSR_lims
+        self.p0_lims = p0_lims
+        self.depth_genes = depth_genes 
+        self.interpolator = interpolator
+        depth, y = data
+        self.depth = depth
+        self.y = y
+        self.fsp = fsp
+        self.metric = metric
+        self.n_pieces = n_pieces
+        N_genes_invSR = len(depth_genes)
+        xl = np.zeros(N_genes_invSR+1) + invSR_lims[0]
+        xu = np.zeros(N_genes_invSR+1) + invSR_lims[1]
+        xl[0] = p0_lims[0]; xu[0] = p0_lims[1]
+        self.invSR_to_predx = partial(invSR_to_pred, data=data, interpolator=interpolator, invSR_lims=invSR_lims)
+        super().__init__(n_var=N_genes_invSR+1, n_obj=n_pieces, n_ieq_constr=1, xl=xl, xu=xu)
+        
+    def _evaluate(self, genes, out, *args, **kwargs):
+        genes_p0 = genes[0]
+        genes_invSR = genes[1:]
+        fs = self.fsp.copy()
+        fs[:5] += genes_p0
+        time, y_pred = self.invSR_to_predx([self.depth_genes, genes_invSR], fs=fs)
+        out["F"] = -self.metric(self.y, y_pred, self.n_pieces)
+        out["G"] = [ (time[-1]-time[0])*fs[3]/2/np.pi - (len(self.y)-1)/2]
+        # print(time[-1])
 class Callback_getF(Callback):
 
     def __init__(self) -> None:
